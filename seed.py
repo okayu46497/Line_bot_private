@@ -50,7 +50,12 @@ https://drive.google.com/file/d/10gOAEBDf0uD1d3MjU3Tfy7GvdQQbh8JH/view?usp=shari
 https://drive.google.com/file/d/10qTAsvQlMssc0QLCwZqA-92ICOmiaErx/view?usp=sharing
 
 4. 学費口座引落登録方法について
-https://drive.google.com/file/d/1ev2aSBvjXq3nUV9y4FSQIF05QEmZG7gP/view?usp=sharing"""
+https://drive.google.com/file/d/1ev2aSBvjXq3nUV9y4FSQIF05QEmZG7gP/view?usp=sharing
+
+
+■ 支払い完了後のご連絡
+
+学費の納入が完了しましたら、このチャットに「支払った」とメッセージを送ってください。"""
 
 
 def seed_schedules():

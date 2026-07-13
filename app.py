@@ -268,6 +268,16 @@ def handle_command(db: Session, user: User, text: str) -> str | None:
             lines.append(f"  {s.month}月{s.day}日: {first_line}")
         return "\n".join(lines)
 
+    elif text_stripped in ("支払った", "支払い完了", "納入済み"):
+        # 支払い確認 → 現在の月から前期/後期を判定して来期を案内
+        now = datetime.now(JST)
+        if 4 <= now.month <= 8:
+            # 前期の支払い → 来期は後期（9月上旬）
+            return "今期の学費納入を確認しました。来期は9月上旬ごろの案内となります。"
+        else:
+            # 後期の支払い → 来期は前期（4月上旬）
+            return "今期の学費納入を確認しました。来期は4月上旬ごろの案内となります。"
+
     elif text_stripped in ("テスト通知", "テスト", "test"):
         # テスト: 登録済みスケジュールの最初の1件を実際に送信する
         schedule = (
@@ -303,15 +313,13 @@ def handle_command(db: Session, user: User, text: str) -> str | None:
             "📚 学費支払い通知Bot ヘルプ\n\n"
             "以下のメッセージを送ると情報を確認できます：\n"
             '・「スケジュール」→ 通知予定一覧\n'
+            '・「支払った」→ 学費納入の報告\n'
             '・「テスト通知」→ 通知メッセージをテスト送信\n'
             '・「ヘルプ」→ この説明を表示'
         )
 
     else:
-        return (
-            f"{user.display_name}さん、メッセージありがとうございます。\n"
-            '「ヘルプ」と送ると使い方を確認できます。'
-        )
+        return "記録しました。"
 
 
 # ---------------------------------------------------------------------------
