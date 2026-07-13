@@ -172,9 +172,10 @@ async def webhook(request: Request, db: Session = Depends(get_db)):
 
                 # ウェルカムメッセージ送信
                 welcome_text = (
-                    f"{user.display_name}さん、友だち追加ありがとうございます！\n"
-                    "学費支払い通知Botです。\n"
-                    "支払い期限が近づくとリマインドをお送りします📚"
+                    "このbotは学費通知botです。\n"
+                    "前期・後期の学費支払期限が近づき次第リマインドします。\n"
+                    "(案内予定日：4月5日及び9月5日)\n\n"
+                    "またこのbotに対するメッセージはすべて保存されます。"
                 )
                 push_message(line_user_id, welcome_text)
 
@@ -239,9 +240,13 @@ def handle_command(db: Session, user: User, text: str) -> str | None:
 
     対応コマンド:
     - 「スケジュール」: 登録済みスケジュール一覧を表示
+    - 「テスト通知」: 実際の通知メッセージをテスト送信
     - 「ヘルプ」: 利用方法を表示
     - その他: デフォルトの応答
     """
+    from datetime import datetime, timezone, timedelta
+    JST = timezone(timedelta(hours=9))
+
     text_stripped = text.strip()
 
     if text_stripped in ("スケジュール", "予定", "一覧"):
@@ -262,11 +267,42 @@ def handle_command(db: Session, user: User, text: str) -> str | None:
             lines.append(f"  {s.month}月{s.day}日: {first_line}")
         return "\n".join(lines)
 
+    elif text_stripped in ("テスト通知", "テスト", "test"):
+        # テスト: 登録済みスケジュールの最初の1件を実際に送信する
+        schedule = (
+            db.query(Schedule)
+            .filter(Schedule.enabled == True)  # noqa: E712
+            .order_by(Schedule.month, Schedule.day)
+            .first()
+        )
+        if not schedule:
+            return "⚠ 登録されたスケジュールがないためテストできません。"
+
+        # {year} を現在の年度に置換
+        fiscal_year = datetime.now(JST).year
+        test_message = schedule.message.replace("{year}", str(fiscal_year))
+
+        # 送信
+        success = push_message(user.line_user_id, test_message)
+        if success:
+            # 送信履歴を保存
+            msg_record = Message(
+                user_id=user.id,
+                message_text=test_message,
+                direction="sent",
+            )
+            db.add(msg_record)
+            db.commit()
+            return None  # テスト通知自体がメッセージなので追加応答は不要
+        else:
+            return "⚠ テスト通知の送信に失敗しました。ログを確認してください。"
+
     elif text_stripped in ("ヘルプ", "help", "使い方"):
         return (
             "📚 学費支払い通知Bot ヘルプ\n\n"
             "以下のメッセージを送ると情報を確認できます：\n"
             '・「スケジュール」→ 通知予定一覧\n'
+            '・「テスト通知」→ 通知メッセージをテスト送信\n'
             '・「ヘルプ」→ この説明を表示'
         )
 
