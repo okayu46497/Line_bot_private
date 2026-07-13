@@ -10,13 +10,26 @@ jobs:
   trigger-cron:
     runs-on: ubuntu-latest
     steps:
+      - name: Wake up Render (free tier sleep対策)
+        run: |
+          echo "Waking up: ${{ secrets.RENDER_URL }}"
+          curl -s -o /dev/null -w "Wake-up HTTP Status: %{http_code}\n" \
+            --max-time 60 \
+            "${{ secrets.RENDER_URL }}/" || true
+          echo "Waiting 5 seconds..."
+          sleep 5
+
       - name: Call cron endpoint
         run: |
-          response=$(curl -s -o /dev/null -w "%{http_code}" \
-            "${{ secrets.RENDER_URL }}/cron/run?key=${{ secrets.CRON_SECRET }}")
-          echo "HTTP Status: $response"
-          if [ "$response" != "200" ]; then
-            echo "::error::Cron endpoint returned $response"
+          TARGET_URL="${{ secrets.RENDER_URL }}/cron/run?key=${{ secrets.CRON_SECRET }}"
+          echo "Accessing: ${{ secrets.RENDER_URL }}/cron/run?key=***"
+          response=$(curl -s -w "\n%{http_code}" --max-time 60 "$TARGET_URL")
+          http_code=$(echo "$response" | tail -1)
+          body=$(echo "$response" | head -n -1)
+          echo "HTTP Status: $http_code"
+          echo "Response: $body"
+          if [ "$http_code" != "200" ]; then
+            echo "::error::Cron endpoint returned $http_code"
             exit 1
           fi
           echo "Cron executed successfully"
