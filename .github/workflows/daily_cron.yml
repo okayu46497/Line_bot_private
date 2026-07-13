@@ -1,0 +1,22 @@
+name: Daily Tuition Reminder Check
+
+on:
+  schedule:
+    # UTC 23:00 = JST 08:00 (毎朝8時)
+    - cron: '0 23 * * *'
+  workflow_dispatch:  # 手動実行も可能
+
+jobs:
+  trigger-cron:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call cron endpoint
+        run: |
+          response=$(curl -s -o /dev/null -w "%{http_code}" \
+            "${{ secrets.RENDER_URL }}/cron/run?key=${{ secrets.CRON_SECRET }}")
+          echo "HTTP Status: $response"
+          if [ "$response" != "200" ]; then
+            echo "::error::Cron endpoint returned $response"
+            exit 1
+          fi
+          echo "Cron executed successfully"

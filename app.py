@@ -38,6 +38,7 @@ logger = logging.getLogger(__name__)
 
 CHANNEL_SECRET = os.getenv("CHANNEL_SECRET", "")
 CHANNEL_ACCESS_TOKEN = os.getenv("CHANNEL_ACCESS_TOKEN", "")
+CRON_SECRET = os.getenv("CRON_SECRET", "")
 
 
 @asynccontextmanager
@@ -353,6 +354,32 @@ def setup_default_schedules(db: Session = Depends(get_db)):
             for s in default_schedules
         ],
     }
+
+
+# ---------------------------------------------------------------------------
+# Cron 実行エンドポイント（GitHub Actions から呼び出す）
+# ---------------------------------------------------------------------------
+@app.get("/cron/run")
+def cron_run(key: str = "", db: Session = Depends(get_db)):
+    """
+    GitHub Actions から毎日呼び出される通知実行エンドポイント。
+    クエリパラメータ key が CRON_SECRET と一致する場合のみ実行する。
+
+    使用例: GET /cron/run?key=your_cron_secret
+    """
+    # 認証チェック
+    if not CRON_SECRET or key != CRON_SECRET:
+        logger.warning("Cron実行: 認証失敗")
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    from scheduler import run_scheduled_notifications
+    try:
+        run_scheduled_notifications()
+        logger.info("Cron実行: 完了")
+        return {"status": "ok", "message": "スケジュール確認を実行しました。"}
+    except Exception as e:
+        logger.error(f"Cron実行エラー: {e}", exc_info=True)
+        return {"status": "error", "message": str(e)}
 
 
 # ---------------------------------------------------------------------------
