@@ -81,14 +81,6 @@ def run_scheduled_notifications():
                 success = push_message(user.line_user_id, send_message)
 
                 if success:
-                    # 送信履歴を保存
-                    msg_record = Message(
-                        user_id=user.id,
-                        message_text=send_message,
-                        direction="sent",
-                    )
-                    db.add(msg_record)
-                    db.commit()
                     logger.info(f"送信完了: {user.display_name}")
                 else:
                     logger.error(f"送信失敗: {user.display_name}")

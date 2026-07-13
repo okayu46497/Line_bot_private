@@ -180,15 +180,6 @@ async def webhook(request: Request, db: Session = Depends(get_db)):
                 )
                 push_message(line_user_id, welcome_text)
 
-                # 送信履歴を保存
-                msg_record = Message(
-                    user_id=user.id,
-                    message_text=welcome_text,
-                    direction="sent",
-                )
-                db.add(msg_record)
-                db.commit()
-
             # メッセージイベント
             elif event_type == "message":
                 message = event.get("message", {})
@@ -201,7 +192,7 @@ async def webhook(request: Request, db: Session = Depends(get_db)):
                 # ユーザー取得 or 登録
                 user = get_or_create_user(db, line_user_id)
 
-                # 受信メッセージを履歴に保存
+                # 受信メッセージを履歴に保存（相手からのメッセージのみ）
                 msg_record = Message(
                     user_id=user.id,
                     message_text=text,
@@ -216,14 +207,6 @@ async def webhook(request: Request, db: Session = Depends(get_db)):
                 response_text = handle_command(db, user, text)
                 if response_text:
                     push_message(line_user_id, response_text)
-                    # 送信履歴を保存
-                    sent_record = Message(
-                        user_id=user.id,
-                        message_text=response_text,
-                        direction="sent",
-                    )
-                    db.add(sent_record)
-                    db.commit()
 
     except Exception as e:
         # どんなエラーが起きても200を返す（LINE仕様）
@@ -296,14 +279,6 @@ def handle_command(db: Session, user: User, text: str) -> str | None:
         # 送信
         success = push_message(user.line_user_id, test_message)
         if success:
-            # 送信履歴を保存
-            msg_record = Message(
-                user_id=user.id,
-                message_text=test_message,
-                direction="sent",
-            )
-            db.add(msg_record)
-            db.commit()
             return None  # テスト通知自体がメッセージなので追加応答は不要
         else:
             return "⚠ テスト通知の送信に失敗しました。ログを確認してください。"
