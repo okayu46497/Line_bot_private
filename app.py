@@ -1,0 +1,356 @@
+"""
+app.py - FastAPI メインアプリケーション
+
+LINE Messaging API Webhook の受信・処理を行う。
+以下の機能を提供する：
+- Webhook署名検証
+- メッセージイベント処理
+- ユーザー自動登録（初回利用時）
+- メッセージ履歴保存
+- ヘルスチェックエンドポイント
+- 初期スケジュール投入エンドポイント
+"""
+
+import os
+import logging
+import hashlib
+import hmac
+import base64
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, Request, HTTPException, Depends
+from fastapi.responses import JSONResponse
+from sqlalchemy.orm import Session
+from dotenv import load_dotenv
+
+from database import init_db, get_db
+from models import User, Message, Schedule, now_jst
+from line_service import get_user_profile, push_message
+
+load_dotenv()
+
+# ログ設定
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+CHANNEL_SECRET = os.getenv("CHANNEL_SECRET", "")
+CHANNEL_ACCESS_TOKEN = os.getenv("CHANNEL_ACCESS_TOKEN", "")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """アプリケーション起動時にDBを初期化する"""
+    init_db()
+    logger.info("データベース初期化完了")
+    yield
+
+
+app = FastAPI(
+    title="学費支払い通知Bot",
+    description="LINE Messaging APIを利用した学費支払いリマインドBot",
+    version="1.0.0",
+    lifespan=lifespan,
+)
+
+
+# ---------------------------------------------------------------------------
+# ヘルスチェック
+# ---------------------------------------------------------------------------
+@app.get("/")
+def health_check():
+    """Render等のヘルスチェック用"""
+    return {"status": "ok", "message": "学費支払い通知Bot is running"}
+
+
+# ---------------------------------------------------------------------------
+# Webhook署名検証
+# ---------------------------------------------------------------------------
+def verify_signature(body: bytes, signature: str) -> bool:
+    """LINE Webhookの署名を検証する"""
+    hash_value = hmac.new(
+        CHANNEL_SECRET.encode("utf-8"),
+        body,
+        hashlib.sha256,
+    ).digest()
+    expected_signature = base64.b64encode(hash_value).decode("utf-8")
+    return hmac.compare_digest(signature, expected_signature)
+
+
+# ---------------------------------------------------------------------------
+# ユーザー登録・取得
+# ---------------------------------------------------------------------------
+def get_or_create_user(db: Session, line_user_id: str) -> User:
+    """
+    ユーザーをDBから取得する。存在しなければ新規作成する。
+    LINEプロフィールAPIからdisplayNameも取得して保存する。
+    """
+    user = db.query(User).filter(User.line_user_id == line_user_id).first()
+
+    if user:
+        # displayNameを最新に更新
+        profile = get_user_profile(line_user_id)
+        if profile and profile.get("displayName"):
+            user.display_name = profile["displayName"]
+            user.updated_at = now_jst()
+            db.commit()
+        return user
+
+    # 新規ユーザー作成
+    logger.info(f"新規ユーザー登録: {line_user_id}")
+    profile = get_user_profile(line_user_id)
+    display_name = profile.get("displayName", "Unknown") if profile else "Unknown"
+
+    new_user = User(
+        line_user_id=line_user_id,
+        display_name=display_name,
+    )
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+
+    logger.info(f"ユーザー登録完了: {new_user}")
+    return new_user
+
+
+# ---------------------------------------------------------------------------
+# Webhook受信
+# ---------------------------------------------------------------------------
+@app.post("/webhook")
+async def webhook(request: Request, db: Session = Depends(get_db)):
+    """
+    LINE Messaging API Webhook エンドポイント
+
+    1. 署名検証
+    2. イベント解析
+    3. ユーザー登録・更新
+    4. メッセージ履歴保存
+    5. 応答メッセージ送信
+    """
+    body = await request.body()
+    signature = request.headers.get("X-Line-Signature", "")
+
+    # 署名検証
+    if not verify_signature(body, signature):
+        logger.warning("Webhook署名検証失敗")
+        raise HTTPException(status_code=403, detail="Invalid signature")
+
+    # イベント解析
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    events = payload.get("events", [])
+    logger.info(f"Webhook受信: {len(events)}件のイベント")
+
+    for event in events:
+        event_type = event.get("type")
+
+        # フォローイベント（友だち追加時）
+        if event_type == "follow":
+            line_user_id = event["source"]["userId"]
+            user = get_or_create_user(db, line_user_id)
+            logger.info(f"フォローイベント: {user.display_name}")
+
+            # ウェルカムメッセージ送信
+            welcome_text = (
+                f"{user.display_name}さん、友だち追加ありがとうございます！\n"
+                "学費支払い通知Botです。\n"
+                "支払い期限が近づくとリマインドをお送りします📚"
+            )
+            push_message(line_user_id, welcome_text)
+
+            # 送信履歴を保存
+            msg_record = Message(
+                user_id=user.id,
+                message_text=welcome_text,
+                direction="sent",
+            )
+            db.add(msg_record)
+            db.commit()
+
+        # メッセージイベント
+        elif event_type == "message":
+            message = event.get("message", {})
+            if message.get("type") != "text":
+                continue
+
+            line_user_id = event["source"]["userId"]
+            text = message.get("text", "")
+
+            # ユーザー取得 or 登録
+            user = get_or_create_user(db, line_user_id)
+
+            # 受信メッセージを履歴に保存
+            msg_record = Message(
+                user_id=user.id,
+                message_text=text,
+                direction="recv",
+            )
+            db.add(msg_record)
+            db.commit()
+
+            logger.info(f"メッセージ受信: {user.display_name} -> {text}")
+
+            # コマンド処理
+            response_text = handle_command(db, user, text)
+            if response_text:
+                push_message(line_user_id, response_text)
+                # 送信履歴を保存
+                sent_record = Message(
+                    user_id=user.id,
+                    message_text=response_text,
+                    direction="sent",
+                )
+                db.add(sent_record)
+                db.commit()
+
+    return JSONResponse(content={"status": "ok"}, status_code=200)
+
+
+# ---------------------------------------------------------------------------
+# コマンド処理
+# ---------------------------------------------------------------------------
+def handle_command(db: Session, user: User, text: str) -> str | None:
+    """
+    ユーザーからのメッセージに応じた処理を行う。
+
+    対応コマンド:
+    - 「スケジュール」: 登録済みスケジュール一覧を表示
+    - 「ヘルプ」: 利用方法を表示
+    - その他: デフォルトの応答
+    """
+    text_stripped = text.strip()
+
+    if text_stripped in ("スケジュール", "予定", "一覧"):
+        # スケジュール一覧を返す
+        schedules = (
+            db.query(Schedule)
+            .filter(Schedule.enabled == True)  # noqa: E712
+            .order_by(Schedule.month, Schedule.day)
+            .all()
+        )
+        if not schedules:
+            return "登録されたスケジュールはありません。"
+
+        lines = ["📅 通知スケジュール一覧\n"]
+        for s in schedules:
+            # メッセージの1行目だけを表示（長文対策）
+            first_line = s.message.split("\n")[0]
+            lines.append(f"  {s.month}月{s.day}日: {first_line}")
+        return "\n".join(lines)
+
+    elif text_stripped in ("ヘルプ", "help", "使い方"):
+        return (
+            "📚 学費支払い通知Bot ヘルプ\n\n"
+            "以下のメッセージを送ると情報を確認できます：\n"
+            '・「スケジュール」→ 通知予定一覧\n'
+            '・「ヘルプ」→ この説明を表示'
+        )
+
+    else:
+        return (
+            f"{user.display_name}さん、メッセージありがとうございます。\n"
+            '「ヘルプ」と送ると使い方を確認できます。'
+        )
+
+
+# ---------------------------------------------------------------------------
+# 初期スケジュール投入
+# ---------------------------------------------------------------------------
+@app.post("/setup/schedules")
+def setup_default_schedules(db: Session = Depends(get_db)):
+    """
+    デフォルトの学費通知スケジュールを投入する。
+    既存のスケジュールがある場合はスキップする。
+    """
+    from seed import MESSAGE_TEMPLATE
+
+    existing = db.query(Schedule).count()
+    if existing > 0:
+        return {"message": f"既に{existing}件のスケジュールが登録されています。"}
+
+    default_schedules = [
+        Schedule(
+            month=4,
+            day=5,
+            message=MESSAGE_TEMPLATE.format(semester="前期", year="{year}"),
+        ),
+        Schedule(
+            month=9,
+            day=5,
+            message=MESSAGE_TEMPLATE.format(semester="後期", year="{year}"),
+        ),
+    ]
+
+    for s in default_schedules:
+        db.add(s)
+    db.commit()
+
+    logger.info("デフォルトスケジュール投入完了")
+    return {
+        "message": "デフォルトスケジュールを登録しました。",
+        "schedules": [
+            {"month": s.month, "day": s.day}
+            for s in default_schedules
+        ],
+    }
+
+
+# ---------------------------------------------------------------------------
+# 管理用エンドポイント
+# ---------------------------------------------------------------------------
+@app.get("/admin/users")
+def list_users(db: Session = Depends(get_db)):
+    """登録ユーザー一覧を取得する"""
+    users = db.query(User).all()
+    return [
+        {
+            "id": u.id,
+            "line_user_id": u.line_user_id,
+            "display_name": u.display_name,
+            "created_at": str(u.created_at),
+        }
+        for u in users
+    ]
+
+
+@app.get("/admin/messages")
+def list_messages(db: Session = Depends(get_db)):
+    """メッセージ履歴を取得する（直近50件）"""
+    messages = (
+        db.query(Message)
+        .order_by(Message.created_at.desc())
+        .limit(50)
+        .all()
+    )
+    return [
+        {
+            "id": m.id,
+            "user_id": m.user_id,
+            "message_text": m.message_text,
+            "direction": m.direction,
+            "created_at": str(m.created_at),
+        }
+        for m in messages
+    ]
+
+
+@app.get("/admin/schedules")
+def list_schedules(db: Session = Depends(get_db)):
+    """スケジュール一覧を取得する"""
+    schedules = db.query(Schedule).all()
+    return [
+        {
+            "id": s.id,
+            "month": s.month,
+            "day": s.day,
+            "message": s.message,
+            "target_user_id": s.target_user_id,
+            "enabled": s.enabled,
+        }
+        for s in schedules
+    ]
