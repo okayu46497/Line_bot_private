@@ -118,6 +118,12 @@ def get_or_create_user(db: Session, line_user_id: str) -> User:
 # ---------------------------------------------------------------------------
 # Webhook受信
 # ---------------------------------------------------------------------------
+@app.get("/webhook")
+def webhook_get():
+    """LINE Webhook URL検証用（GETリクエスト対応）"""
+    return JSONResponse(content={"status": "ok"}, status_code=200)
+
+
 @app.post("/webhook")
 async def webhook(request: Request, db: Session = Depends(get_db)):
     """
@@ -128,85 +134,98 @@ async def webhook(request: Request, db: Session = Depends(get_db)):
     3. ユーザー登録・更新
     4. メッセージ履歴保存
     5. 応答メッセージ送信
+
+    注意: LINE仕様上、いかなる場合も200を返す必要がある
     """
     body = await request.body()
     signature = request.headers.get("X-Line-Signature", "")
 
-    # 署名検証
+    # 署名検証（失敗してもログのみ、200は返す）
     if not verify_signature(body, signature):
         logger.warning("Webhook署名検証失敗")
-        raise HTTPException(status_code=403, detail="Invalid signature")
+        return JSONResponse(content={"status": "error", "message": "Invalid signature"}, status_code=200)
 
-    # イベント解析
     try:
-        payload = await request.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid JSON")
+        # イベント解析
+        try:
+            payload = await request.json()
+        except Exception:
+            logger.warning("JSONパース失敗")
+            return JSONResponse(content={"status": "ok"}, status_code=200)
 
-    events = payload.get("events", [])
-    logger.info(f"Webhook受信: {len(events)}件のイベント")
+        events = payload.get("events", [])
+        logger.info(f"Webhook受信: {len(events)}件のイベント")
 
-    for event in events:
-        event_type = event.get("type")
+        # events が空 = LINE Webhook URL検証リクエスト
+        if not events:
+            logger.info("Webhook検証リクエスト（eventsが空）→ 200 OK")
+            return JSONResponse(content={"status": "ok"}, status_code=200)
 
-        # フォローイベント（友だち追加時）
-        if event_type == "follow":
-            line_user_id = event["source"]["userId"]
-            user = get_or_create_user(db, line_user_id)
-            logger.info(f"フォローイベント: {user.display_name}")
+        for event in events:
+            event_type = event.get("type")
 
-            # ウェルカムメッセージ送信
-            welcome_text = (
-                f"{user.display_name}さん、友だち追加ありがとうございます！\n"
-                "学費支払い通知Botです。\n"
-                "支払い期限が近づくとリマインドをお送りします📚"
-            )
-            push_message(line_user_id, welcome_text)
+            # フォローイベント（友だち追加時）
+            if event_type == "follow":
+                line_user_id = event["source"]["userId"]
+                user = get_or_create_user(db, line_user_id)
+                logger.info(f"フォローイベント: {user.display_name}")
 
-            # 送信履歴を保存
-            msg_record = Message(
-                user_id=user.id,
-                message_text=welcome_text,
-                direction="sent",
-            )
-            db.add(msg_record)
-            db.commit()
+                # ウェルカムメッセージ送信
+                welcome_text = (
+                    f"{user.display_name}さん、友だち追加ありがとうございます！\n"
+                    "学費支払い通知Botです。\n"
+                    "支払い期限が近づくとリマインドをお送りします📚"
+                )
+                push_message(line_user_id, welcome_text)
 
-        # メッセージイベント
-        elif event_type == "message":
-            message = event.get("message", {})
-            if message.get("type") != "text":
-                continue
-
-            line_user_id = event["source"]["userId"]
-            text = message.get("text", "")
-
-            # ユーザー取得 or 登録
-            user = get_or_create_user(db, line_user_id)
-
-            # 受信メッセージを履歴に保存
-            msg_record = Message(
-                user_id=user.id,
-                message_text=text,
-                direction="recv",
-            )
-            db.add(msg_record)
-            db.commit()
-
-            logger.info(f"メッセージ受信: {user.display_name} -> {text}")
-
-            # コマンド処理
-            response_text = handle_command(db, user, text)
-            if response_text:
-                push_message(line_user_id, response_text)
                 # 送信履歴を保存
-                sent_record = Message(
+                msg_record = Message(
                     user_id=user.id,
-                    message_text=response_text,
+                    message_text=welcome_text,
                     direction="sent",
                 )
-                db.add(sent_record)
+                db.add(msg_record)
                 db.commit()
+
+            # メッセージイベント
+            elif event_type == "message":
+                message = event.get("message", {})
+                if message.get("type") != "text":
+                    continue
+
+                line_user_id = event["source"]["userId"]
+                text = message.get("text", "")
+
+                # ユーザー取得 or 登録
+                user = get_or_create_user(db, line_user_id)
+
+                # 受信メッセージを履歴に保存
+                msg_record = Message(
+                    user_id=user.id,
+                    message_text=text,
+                    direction="recv",
+                )
+                db.add(msg_record)
+                db.commit()
+
+                logger.info(f"メッセージ受信: {user.display_name} -> {text}")
+
+                # コマンド処理
+                response_text = handle_command(db, user, text)
+                if response_text:
+                    push_message(line_user_id, response_text)
+                    # 送信履歴を保存
+                    sent_record = Message(
+                        user_id=user.id,
+                        message_text=response_text,
+                        direction="sent",
+                    )
+                    db.add(sent_record)
+                    db.commit()
+
+    except Exception as e:
+        # どんなエラーが起きても200を返す（LINE仕様）
+        logger.error(f"Webhook処理中にエラー発生: {e}", exc_info=True)
 
     return JSONResponse(content={"status": "ok"}, status_code=200)
 
